@@ -1,6 +1,6 @@
 {
   "name": "@vibecontrols/vibe-plugin-gemini",
-  "version": "0.0.0-dev",
+  "version": "2026.329.1",
   "type": "module",
   "main": "./dist/index.js",
   "description": "Google Gemini AI agent provider for VibeControls Agent",
