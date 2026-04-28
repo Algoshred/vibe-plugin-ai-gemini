@@ -1,6 +1,6 @@
 {
-  "name": "@vibecontrols/vibe-plugin-gemini",
-  "version": "2026.428.1",
+  "name": "@vibecontrols/vibe-plugin-ai-gemini",
+  "version": "2026.428.3",
   "type": "module",
   "main": "./dist/index.js",
   "description": "Google Gemini AI agent provider for VibeControls Agent",
@@ -57,14 +57,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/algoshred/vibe-plugin-gemini.git"
+    "url": "git+https://github.com/algoshred/vibe-plugin-ai-gemini.git"
   },
   "bugs": {
-    "url": "https://github.com/algoshred/vibe-plugin-gemini/issues"
+    "url": "https://github.com/algoshred/vibe-plugin-ai-gemini/issues"
   },
   "homepage": "https://vibecontrols.com",
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
