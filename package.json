@@ -26,7 +26,8 @@
     "sanity": "bun run format:check && bun run lint && bun run type:check && bun run build"
   },
   "dependencies": {
-    "@google/genai": "^1.0.0"
+    "@google/genai": "^1.0.0",
+    "elysia": "^1.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

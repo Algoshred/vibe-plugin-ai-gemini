@@ -6,6 +6,8 @@
  * Auto-detects mode based on available resources.
  */
 
+import { Elysia } from "elysia";
+
 // ── Locally Redeclared Interfaces ────────────────────────────────────────
 // (Avoid hard dependency on @vibecontrols/agent)
 
@@ -50,6 +52,13 @@ interface VibePlugin {
   >;
   cliCommand?: string;
   apiPrefix?: string;
+  prerequisites?: Array<{
+    name: string;
+    kind: "binary" | "npm" | "pip" | "cargo" | "manual";
+    requiresSudo: boolean;
+    description?: string;
+  }>;
+  createRoutes?: () => unknown;
   providers?: { ai?: AIAgentProvider; [key: string]: unknown };
   onServerStart?: (
     app: unknown,
@@ -246,6 +255,9 @@ const PROVIDER_NAME = "gemini";
 const CLI_COMMAND = "gemini";
 const DISPLAY_NAME = "Google Gemini";
 const DEFAULT_MODEL = "gemini-2.5-flash";
+const API_PREFIX = `/api/ai-${PROVIDER_NAME}`;
+const SUPPORTED_MODES: ProviderMode[] = ["sdk", "cli"];
+const CLI_INSTALL_COMMAND = ["npm", "install", "-g", "@google/gemini-cli"];
 
 const KNOWN_MODELS: AIModelInfo[] = [
   {
@@ -375,8 +387,7 @@ class GeminiSdkAdapter implements ProviderAdapter {
 
     const content = response.text ?? "";
     const inputTokens =
-      response.usageMetadata?.promptTokenCount ??
-      Math.ceil(prompt.length / 4);
+      response.usageMetadata?.promptTokenCount ?? Math.ceil(prompt.length / 4);
     const outputTokens =
       response.usageMetadata?.candidatesTokenCount ??
       Math.ceil(content.length / 4);
@@ -441,7 +452,10 @@ class GeminiSdkAdapter implements ProviderAdapter {
   async healthCheck(): Promise<{ ok: boolean; message?: string }> {
     try {
       await this.getClient();
-      return { ok: true, message: `${DISPLAY_NAME} SDK initialized (mode: sdk)` };
+      return {
+        ok: true,
+        message: `${DISPLAY_NAME} SDK initialized (mode: sdk)`,
+      };
     } catch (err) {
       return {
         ok: false,
@@ -613,8 +627,19 @@ class GeminiProvider implements AIAgentProvider {
   setHostServices(hs: HostServices) {
     this.hostServices = hs;
     this.logIngester =
-      hs.serviceRegistry?.getService<LogIngester>("ai", "log-ingester") ??
-      null;
+      hs.serviceRegistry?.getService<LogIngester>("ai", "log-ingester") ?? null;
+  }
+
+  getSupportedModes(): ProviderMode[] {
+    return [...SUPPORTED_MODES];
+  }
+
+  getDisplayName(): string {
+    return DISPLAY_NAME;
+  }
+
+  getPrereqApiPrefix(): string {
+    return API_PREFIX;
   }
 
   getMode(): ProviderMode {
@@ -625,6 +650,9 @@ class GeminiProvider implements AIAgentProvider {
   }
 
   setMode(mode: ProviderMode): void {
+    if (!SUPPORTED_MODES.includes(mode)) {
+      throw new Error(`${DISPLAY_NAME} does not support ${mode} mode`);
+    }
     this.currentMode = mode;
     this.adapter = null;
     this.log("info", `Mode set to: ${mode}`);
@@ -715,7 +743,10 @@ class GeminiProvider implements AIAgentProvider {
     };
 
     this.sessions.set(id, session);
-    this.log("info", `Session created: ${id} (${config.name}) [${this.getMode()}]`);
+    this.log(
+      "info",
+      `Session created: ${id} (${config.name}) [${this.getMode()}]`,
+    );
 
     return {
       id,
@@ -751,7 +782,11 @@ class GeminiProvider implements AIAgentProvider {
     this.logIngester?.append({ sessionId, type: "input", content: prompt });
 
     try {
-      const result = await adapter.sendPrompt(fullPrompt, model, session.config);
+      const result = await adapter.sendPrompt(
+        fullPrompt,
+        model,
+        session.config,
+      );
       const durationMs = Date.now() - startTime;
 
       this.updateStats(session, result.inputTokens, result.outputTokens, model);
@@ -1033,6 +1068,77 @@ class GeminiProvider implements AIAgentProvider {
 
 // ── Plugin Export ────────────────────────────────────────────────────────
 
+function getCliVersion(): string | null {
+  try {
+    const proc = Bun.spawnSync([CLI_COMMAND, "--version"], {
+      timeout: 5000,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (proc.exitCode === 0) return proc.stdout.toString().trim();
+  } catch {
+    // Binary not found.
+  }
+  return null;
+}
+
+function createPrereqsRoutes() {
+  return new Elysia({ prefix: "/prereqs" })
+    .get("/status", () => {
+      const version = getCliVersion();
+      return {
+        satisfied: Boolean(version),
+        missing: version
+          ? []
+          : [
+              {
+                name: CLI_COMMAND,
+                kind: "npm" as const,
+                requiresSudo: false,
+                description: `${DISPLAY_NAME} CLI for CLI mode`,
+              },
+            ],
+      };
+    })
+    .post("/install", () => {
+      if (getCliVersion()) {
+        return {
+          ok: true,
+          installed: [CLI_COMMAND],
+          pendingSudo: [],
+          errors: [],
+        };
+      }
+
+      const proc = Bun.spawnSync(CLI_INSTALL_COMMAND, {
+        timeout: 120_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (proc.exitCode === 0) {
+        return {
+          ok: true,
+          installed: [CLI_COMMAND],
+          pendingSudo: [],
+          errors: [],
+        };
+      }
+      return {
+        ok: false,
+        installed: [],
+        pendingSudo: [],
+        errors: [
+          {
+            name: CLI_COMMAND,
+            message:
+              proc.stderr.toString().trim() ||
+              `Run manually: ${CLI_INSTALL_COMMAND.join(" ")}`,
+          },
+        ],
+      };
+    });
+}
+
 const provider = new GeminiProvider();
 
 export const vibePlugin: VibePlugin = {
@@ -1041,7 +1147,17 @@ export const vibePlugin: VibePlugin = {
   description:
     "Google Gemini AI agent provider for VibeControls (SDK + CLI dual-mode)",
   tags: ["provider", "integration"],
+  apiPrefix: API_PREFIX,
+  prerequisites: [
+    {
+      name: CLI_COMMAND,
+      kind: "npm",
+      requiresSudo: false,
+      description: `${DISPLAY_NAME} CLI for CLI mode`,
+    },
+  ],
   providers: { ai: provider },
+  createRoutes: () => createPrereqsRoutes(),
 
   onServerStart(_app, hostServices) {
     if (hostServices) provider.setHostServices(hostServices);
