@@ -976,7 +976,9 @@ class GeminiProvider implements AIAgentProvider {
     }
 
     try {
-      const proc = Bun.spawnSync(["which", CLI_COMMAND], {
+      // Cross-platform: `which` on POSIX, `where.exe` on Windows.
+      const finder = process.platform === "win32" ? "where.exe" : "which";
+      const proc = Bun.spawnSync([finder, CLI_COMMAND], {
         timeout: 3000,
         stdout: "pipe",
         stderr: "ignore",
