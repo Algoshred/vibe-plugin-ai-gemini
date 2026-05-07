@@ -206,6 +206,17 @@ interface AIAgentProvider {
   attachFiles?(sessionId: string, files: AIFileAttachment[]): Promise<void>;
   getMode?(): ProviderMode;
   setMode?(mode: ProviderMode): void;
+  getCliLaunchSpec(): {
+    binary: string;
+    baseArgs?: string[];
+    env?: Record<string, string>;
+  } | null;
+  sdkOneShot(opts: {
+    prompt: string;
+    model?: string;
+    maxTokens?: number;
+    extras?: Record<string, unknown>;
+  }): Promise<{ text: string; usage?: unknown }>;
 }
 
 interface LogIngester {
@@ -942,6 +953,57 @@ class GeminiProvider implements AIAgentProvider {
   async healthCheck(): Promise<{ ok: boolean; message?: string }> {
     const adapter = this.getAdapter();
     return adapter.healthCheck();
+  }
+
+  // ── `vibe ai run` / `vibe ai sdk` integration ────────────────────────
+
+  getCliLaunchSpec(): {
+    binary: string;
+    baseArgs?: string[];
+    env?: Record<string, string>;
+  } | null {
+    const env: Record<string, string> = {};
+    const apiKey =
+      process.env["GOOGLE_API_KEY"]?.trim() ||
+      process.env["GEMINI_API_KEY"]?.trim();
+    if (apiKey) {
+      env["GOOGLE_API_KEY"] = apiKey;
+      env["GEMINI_API_KEY"] = apiKey;
+    }
+    return { binary: CLI_COMMAND, env };
+  }
+
+  async sdkOneShot(opts: {
+    prompt: string;
+    model?: string;
+    maxTokens?: number;
+    extras?: Record<string, unknown>;
+  }): Promise<{ text: string; usage?: unknown }> {
+    const apiKey =
+      process.env["GOOGLE_API_KEY"] || process.env["GEMINI_API_KEY"];
+    if (!apiKey) {
+      throw new Error(
+        "GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required for sdkOneShot",
+      );
+    }
+    const adapter = new GeminiSdkAdapter(apiKey);
+    const model = opts.model ?? DEFAULT_MODEL;
+    const config: AISessionConfig = {
+      name: "vibe-ai-sdk",
+      agentType: PROVIDER_NAME,
+      model,
+      maxTokens: opts.maxTokens,
+      providerConfig: opts.extras,
+    };
+    const result = await adapter.sendPrompt(opts.prompt, model, config);
+    return {
+      text: result.content,
+      usage: {
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        model,
+      },
+    };
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────
