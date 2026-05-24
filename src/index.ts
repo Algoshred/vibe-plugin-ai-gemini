@@ -68,7 +68,7 @@ type AILogType =
   | "error"
   | "metadata";
 
-type PermissionMode = "plan" | "acceptEdits" | "fullAuto";
+export type PermissionMode = "plan" | "acceptEdits" | "fullAuto";
 
 interface AISessionConfig {
   name: string;
@@ -596,11 +596,11 @@ class GeminiCliAdapter implements ProviderAdapter {
   private buildArgs(
     model: string,
     prompt: string,
-    config?: AISessionConfig,
+    config: AISessionConfig,
   ): string[] {
     const args: string[] = ["prompt"];
     if (model && model !== "default") args.push("--model", model);
-    args.push(...permissionFlags(config?.permissionMode));
+    args.push(...permissionFlags(config.permissionMode));
     args.push(prompt);
     return args;
   }
