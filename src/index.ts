@@ -68,6 +68,8 @@ type AILogType =
   | "error"
   | "metadata";
 
+type PermissionMode = "plan" | "acceptEdits" | "fullAuto";
+
 interface AISessionConfig {
   name: string;
   agentType: string;
@@ -76,6 +78,8 @@ interface AISessionConfig {
   temperature?: number;
   systemPrompt?: string;
   workingDirectory?: string;
+  /** Autonomy level for CLI mode; ignored by the SDK adapter. */
+  permissionMode?: PermissionMode;
   providerConfig?: Record<string, unknown>;
 }
 
@@ -482,7 +486,7 @@ class GeminiCliAdapter implements ProviderAdapter {
     outputTokens: number;
     metadata?: Record<string, unknown>;
   }> {
-    const args = this.buildArgs(model, prompt);
+    const args = this.buildArgs(model, prompt, config);
     const proc = Bun.spawn([CLI_BIN, ...args], {
       stdout: "pipe",
       stderr: "pipe",
@@ -523,7 +527,7 @@ class GeminiCliAdapter implements ProviderAdapter {
     outputTokens: number;
     metadata?: Record<string, unknown>;
   }> {
-    const args = this.buildArgs(model, prompt);
+    const args = this.buildArgs(model, prompt, config);
     const proc = Bun.spawn([CLI_BIN, ...args], {
       stdout: "pipe",
       stderr: "pipe",
@@ -589,11 +593,34 @@ class GeminiCliAdapter implements ProviderAdapter {
     return KNOWN_MODELS;
   }
 
-  private buildArgs(model: string, prompt: string): string[] {
+  private buildArgs(
+    model: string,
+    prompt: string,
+    config?: AISessionConfig,
+  ): string[] {
     const args: string[] = ["prompt"];
     if (model && model !== "default") args.push("--model", model);
+    args.push(...permissionFlags(config?.permissionMode));
     args.push(prompt);
     return args;
+  }
+}
+
+/**
+ * Map the provider-agnostic permission mode to Gemini CLI flags.
+ * Gemini CLI exposes `--yolo` (auto-approve everything) and, on newer
+ * versions, `--approval-mode`. Unknown/undefined → safe default
+ * (acceptEdits). plan/acceptEdits emit nothing when the version lacks an
+ * approval flag (the CLI then prompts/defaults). CLI-version-dependent.
+ */
+export function permissionFlags(mode: PermissionMode | undefined): string[] {
+  switch (mode) {
+    case "fullAuto":
+      return ["--yolo"];
+    case "plan":
+    case "acceptEdits":
+    default:
+      return [];
   }
 }
 
