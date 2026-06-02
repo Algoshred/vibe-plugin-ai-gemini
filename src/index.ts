@@ -261,7 +261,7 @@ const DISPLAY_NAME = "Google Gemini";
 const DEFAULT_MODEL = "gemini-2.5-flash";
 const API_PREFIX = `/api/ai-${PROVIDER_NAME}`;
 const SUPPORTED_MODES: ProviderMode[] = ["sdk", "cli"];
-const CLI_INSTALL_COMMAND = ["npm", "install", "-g", "@google/gemini-cli"];
+const CLI_NPM_PACKAGE = "@google/gemini-cli";
 
 const KNOWN_MODELS: AIModelInfo[] = [
   {
@@ -303,10 +303,17 @@ const KNOWN_MODELS: AIModelInfo[] = [
 
 class GeminiSdkAdapter implements ProviderAdapter {
   private client: unknown = null;
-  private apiKey: string;
+  private readonly resolveApiKey: () => Promise<string | undefined>;
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
+  /**
+   * Takes an async resolver rather than a static key so the adapter always
+   * reads the freshest credential — env var OR the agent config bag the
+   * frontend writes to (PUT /api/config/GEMINI_API_KEY). Resolving lazily at
+   * first use (not at construction) means a key saved after the session was
+   * created still takes effect without recreating the adapter.
+   */
+  constructor(resolveApiKey: () => Promise<string | undefined>) {
+    this.resolveApiKey = resolveApiKey;
   }
 
   private async getClient(): Promise<{
@@ -347,20 +354,30 @@ class GeminiSdkAdapter implements ProviderAdapter {
         : never;
     }
 
+    const apiKey = (await this.resolveApiKey())?.trim();
+    if (!apiKey) {
+      throw new Error(
+        "GOOGLE_API_KEY or GEMINI_API_KEY is required for SDK mode. Set it " +
+          "in the AI provider credentials (it is stored in the agent config) " +
+          "or export it in the agent environment.",
+      );
+    }
+
+    let GoogleGenAI: new (opts: { apiKey: string }) => unknown;
     try {
       const mod = await import("@google/genai");
-      const GoogleGenAI = mod.GoogleGenAI;
-      this.client = new GoogleGenAI({ apiKey: this.apiKey });
-      return this.client as ReturnType<typeof this.getClient> extends Promise<
-        infer T
-      >
-        ? T
-        : never;
+      GoogleGenAI = mod.GoogleGenAI;
     } catch {
       throw new Error(
         "Failed to load @google/genai SDK. Install it with: bun add @google/genai",
       );
     }
+    this.client = new GoogleGenAI({ apiKey });
+    return this.client as ReturnType<typeof this.getClient> extends Promise<
+      infer T
+    >
+      ? T
+      : never;
   }
 
   async sendPrompt(
@@ -480,6 +497,30 @@ class GeminiSdkAdapter implements ProviderAdapter {
 // ── CLI Adapter ─────────────────────────────────────────────────────────
 
 class GeminiCliAdapter implements ProviderAdapter {
+  private readonly resolveApiKey: () => Promise<string | undefined>;
+
+  constructor(resolveApiKey: () => Promise<string | undefined>) {
+    this.resolveApiKey = resolveApiKey;
+  }
+
+  /**
+   * Build the spawn environment, layering the resolved API key on top of the
+   * agent's own env. The Gemini CLI authenticates from GEMINI_API_KEY /
+   * GOOGLE_API_KEY, so injecting the key the user saved in the agent config
+   * makes CLI mode work without a separate `gemini` login on the sandbox.
+   */
+  private async spawnEnv(): Promise<Record<string, string>> {
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+    };
+    const apiKey = (await this.resolveApiKey())?.trim();
+    if (apiKey) {
+      env["GEMINI_API_KEY"] = apiKey;
+      env["GOOGLE_API_KEY"] = apiKey;
+    }
+    return env;
+  }
+
   async sendPrompt(
     prompt: string,
     model: string,
@@ -495,6 +536,7 @@ class GeminiCliAdapter implements ProviderAdapter {
       stdout: "pipe",
       stderr: "pipe",
       cwd: config.workingDirectory || process.cwd(),
+      env: await this.spawnEnv(),
       timeout: (config.providerConfig?.timeoutMs as number) || 300_000,
     });
 
@@ -536,6 +578,7 @@ class GeminiCliAdapter implements ProviderAdapter {
       stdout: "pipe",
       stderr: "pipe",
       cwd: config.workingDirectory || process.cwd(),
+      env: await this.spawnEnv(),
       timeout: (config.providerConfig?.timeoutMs as number) || 300_000,
     });
 
@@ -651,6 +694,7 @@ class GeminiProvider implements AIAgentProvider {
   private logger: BoundLogger | null = null;
   private adapter: ProviderAdapter | null = null;
   private currentMode: ProviderMode | null = null;
+  private cachedApiKey: string | undefined;
 
   setHostServices(hs: HostServices) {
     this.hostServices = hs;
@@ -658,6 +702,55 @@ class GeminiProvider implements AIAgentProvider {
     const registry = new ProviderRegistry(hs);
     this.logIngester =
       registry.getProvider<LogIngester>("ai", "log-ingester") ?? null;
+
+    // Warm the cache so autoDetectMode()/getCliLaunchSpec() (both sync) can
+    // see a key the user stored in the agent config bag, not just env vars.
+    void Promise.all([
+      Promise.resolve(hs.getConfig?.("GEMINI_API_KEY")),
+      Promise.resolve(hs.getConfig?.("GOOGLE_API_KEY")),
+    ])
+      .then(([gemini, google]) => {
+        const key = gemini?.trim() || google?.trim();
+        if (key) this.cachedApiKey = key;
+      })
+      .catch(() => {});
+  }
+
+  /**
+   * Resolve the Gemini API key from, in order: the process env (operator
+   * override always wins), the warmed cache, then the agent config bag the
+   * frontend writes to. Mirrors the resolution every other provider uses so
+   * SDK + CLI mode work with a key saved purely through the UI.
+   */
+  private async resolveApiKey(): Promise<string | undefined> {
+    const envKey =
+      process.env["GOOGLE_API_KEY"]?.trim() ||
+      process.env["GEMINI_API_KEY"]?.trim();
+    if (envKey) return envKey;
+
+    if (this.cachedApiKey) return this.cachedApiKey;
+
+    if (this.hostServices?.getConfig) {
+      try {
+        const gemini = (
+          await this.hostServices.getConfig("GEMINI_API_KEY")
+        )?.trim();
+        if (gemini) {
+          this.cachedApiKey = gemini;
+          return gemini;
+        }
+        const google = (
+          await this.hostServices.getConfig("GOOGLE_API_KEY")
+        )?.trim();
+        if (google) {
+          this.cachedApiKey = google;
+          return google;
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   getSupportedModes(): ProviderMode[] {
@@ -984,7 +1077,8 @@ class GeminiProvider implements AIAgentProvider {
     const env: Record<string, string> = {};
     const apiKey =
       process.env["GOOGLE_API_KEY"]?.trim() ||
-      process.env["GEMINI_API_KEY"]?.trim();
+      process.env["GEMINI_API_KEY"]?.trim() ||
+      this.cachedApiKey;
     if (apiKey) {
       env["GOOGLE_API_KEY"] = apiKey;
       env["GEMINI_API_KEY"] = apiKey;
@@ -998,14 +1092,7 @@ class GeminiProvider implements AIAgentProvider {
     maxTokens?: number;
     extras?: Record<string, unknown>;
   }): Promise<{ text: string; usage?: unknown }> {
-    const apiKey =
-      process.env["GOOGLE_API_KEY"] || process.env["GEMINI_API_KEY"];
-    if (!apiKey) {
-      throw new Error(
-        "GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required for sdkOneShot",
-      );
-    }
-    const adapter = new GeminiSdkAdapter(apiKey);
+    const adapter = new GeminiSdkAdapter(() => this.resolveApiKey());
     const model = opts.model ?? DEFAULT_MODEL;
     const config: AISessionConfig = {
       name: "vibe-ai-sdk",
@@ -1031,25 +1118,22 @@ class GeminiProvider implements AIAgentProvider {
     if (this.adapter) return this.adapter;
 
     const mode = this.getMode();
-    if (mode === "sdk") {
-      const apiKey =
-        process.env["GOOGLE_API_KEY"] || process.env["GEMINI_API_KEY"];
-      if (!apiKey) {
-        throw new Error(
-          "GOOGLE_API_KEY or GEMINI_API_KEY environment variable is required for SDK mode",
-        );
-      }
-      this.adapter = new GeminiSdkAdapter(apiKey);
-    } else {
-      this.adapter = new GeminiCliAdapter();
-    }
+    // The adapters resolve the key lazily (env → cache → config bag), so we
+    // no longer throw here for a missing key — that check moved into the SDK
+    // adapter, which can read the config bag the FE writes to.
+    this.adapter =
+      mode === "sdk"
+        ? new GeminiSdkAdapter(() => this.resolveApiKey())
+        : new GeminiCliAdapter(() => this.resolveApiKey());
 
     return this.adapter;
   }
 
   private autoDetectMode(): void {
     const apiKey =
-      process.env["GOOGLE_API_KEY"] || process.env["GEMINI_API_KEY"];
+      process.env["GOOGLE_API_KEY"]?.trim() ||
+      process.env["GEMINI_API_KEY"]?.trim() ||
+      this.cachedApiKey;
     if (apiKey) {
       this.currentMode = "sdk";
       this.log("info", "Auto-detected SDK mode (API key found)");
@@ -1159,6 +1243,45 @@ function getCliVersion(): string | null {
   return null;
 }
 
+/**
+ * Install a global npm CLI, runtime-resiliently. The agent always ships Bun
+ * (it IS a Bun process) but NOT npm/node — the production agent image is Alpine
+ * + Bun only — so a hard-coded `npm install -g` silently fails there. We try
+ * each available global installer in turn and report the last error.
+ */
+function installGlobalNpmCli(pkgSpec: string): {
+  ok: boolean;
+  message: string;
+} {
+  const candidates: string[][] = [
+    ["bun", "install", "-g", pkgSpec],
+    ["npm", "install", "-g", pkgSpec],
+  ];
+  let lastError = "";
+  for (const cmd of candidates) {
+    const exe = cmd[0]!;
+    if (!Bun.which(exe, { PATH: process.env.PATH })) continue;
+    try {
+      const proc = Bun.spawnSync(cmd, {
+        timeout: 180_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (proc.exitCode === 0) return { ok: true, message: cmd.join(" ") };
+      lastError =
+        proc.stderr.toString().trim() || `${exe} exited ${proc.exitCode}`;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  return {
+    ok: false,
+    message:
+      lastError ||
+      `No global installer (bun/npm) found. Run manually: bun install -g ${pkgSpec}`,
+  };
+}
+
 function createPrereqsRoutes() {
   return new Elysia({ prefix: "/prereqs" })
     .get("/status", () => {
@@ -1187,12 +1310,8 @@ function createPrereqsRoutes() {
         };
       }
 
-      const proc = Bun.spawnSync(CLI_INSTALL_COMMAND, {
-        timeout: 120_000,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (proc.exitCode === 0) {
+      const result = installGlobalNpmCli(CLI_NPM_PACKAGE);
+      if (result.ok) {
         return {
           ok: true,
           installed: [CLI_COMMAND],
@@ -1204,14 +1323,7 @@ function createPrereqsRoutes() {
         ok: false,
         installed: [],
         pendingSudo: [],
-        errors: [
-          {
-            name: CLI_COMMAND,
-            message:
-              proc.stderr.toString().trim() ||
-              `Run manually: ${CLI_INSTALL_COMMAND.join(" ")}`,
-          },
-        ],
+        errors: [{ name: CLI_COMMAND, message: result.message }],
       };
     });
 }
