@@ -1,0 +1,3 @@
+# bun fmt reformat (BOFF-10675): formatting only, ignore in git blame.
+# Use: git config blame.ignoreRevsFile .git-blame-ignore-revs
+1dbd76ce903063caae61a136aae15926eff8136e
