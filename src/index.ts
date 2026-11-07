@@ -327,7 +327,7 @@ class GeminiSdkAdapter implements ProviderAdapter {
           abortSignal?: AbortSignal;
         };
       }): Promise<{
-        text: string;
+        text?: string;
         usageMetadata?: {
           promptTokenCount?: number;
           candidatesTokenCount?: number;
@@ -341,9 +341,7 @@ class GeminiSdkAdapter implements ProviderAdapter {
           temperature?: number;
           abortSignal?: AbortSignal;
         };
-      }): AsyncIterable<{ text: string }> & {
-        [Symbol.asyncIterator](): AsyncIterator<{ text: string }>;
-      };
+      }): Promise<AsyncIterable<{ text?: string }>>;
     };
   }> {
     if (this.client) {
@@ -442,7 +440,10 @@ class GeminiSdkAdapter implements ProviderAdapter {
     if (config.temperature !== undefined)
       sdkConfig.temperature = config.temperature;
 
-    const stream = ai.models.generateContentStream({
+    // The SDK resolves the stream only after the HTTP response arrives:
+    // `generateContentStream` returns Promise<AsyncGenerator>, so it must be
+    // awaited before iterating.
+    const stream = await ai.models.generateContentStream({
       model,
       contents: prompt,
       config: sdkConfig,
